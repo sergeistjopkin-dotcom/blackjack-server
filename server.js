@@ -7,7 +7,7 @@ const fs = require('fs');
 // КОНФИГУРАЦИЯ
 // ═══════════════════════════════════════
 const PORT = process.env.PORT || 10000;
-const BOT_TOKEN = 'ТВОЙ_ТОКЕН_БОТА'; // Вставь токен от @BotFather
+const BOT_TOKEN = '8190709618:AAGImULYVSW5AZ8YNtK2CSN3oR8g1RtMrmM'; // Вставь токен от @BotFather
 const GAME_URL = 'https://sergeistjopkin-dotcom.github.io/blackjack-telegram-game/';
 
 // ═══════════════════════════════════════
