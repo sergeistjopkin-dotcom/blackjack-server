@@ -171,13 +171,97 @@ async function handleDaily(chatId, userId) {
 }
 // ═══════════════════ WEBSOCKET ДЛЯ МУЛЬТИПЛЕЕРА ═══════════════════
 const WebSocket = require('ws');
-const wss = new WebSocket.Server({ server: http.createServer() });
 
 let gameRooms = {};
 
-// Перенесём WebSocket на основной сервер позже
-// Сейчас используем отдельный порт
-const wsServer = new WebSocket.Server({ port: 8080 });
+// WebSocket будет создан ПОСЛЕ основного сервера
+function setupWebSocket(server) {
+  const wss = new WebSocket.Server({ server });
+  
+  wss.on('connection', (ws) => {
+    let playerId = null;
+    let currentRoom = null;
+    
+    ws.on('message', (raw) => {
+      let msg;
+      try { msg = JSON.parse(raw); } catch(e) { return; }
+      
+      if (msg.type === 'join_multi') {
+        playerId = msg.userId;
+        currentRoom = msg.roomId;
+        
+        if (!gameRooms[currentRoom]) {
+          gameRooms[currentRoom] = {
+            id: currentRoom,
+            players: {},
+            host: playerId,
+            createdAt: Date.now()
+          };
+        }
+        
+        if (Object.keys(gameRooms[currentRoom].players).length >= 4) {
+          ws.send(JSON.stringify({ type: 'error', message: 'Комната заполнена' }));
+          return;
+        }
+        
+        gameRooms[currentRoom].players[playerId] = {
+          id: playerId,
+          username: msg.username,
+          ws: ws
+        };
+        
+        broadcastMulti(currentRoom, {
+          type: 'room_update',
+          players: Object.values(gameRooms[currentRoom].players).map(p => ({ id: p.id, username: p.username }))
+        });
+        
+        ws.send(JSON.stringify({
+          type: 'joined_room',
+          roomId: currentRoom,
+          players: Object.values(gameRooms[currentRoom].players).map(p => ({ id: p.id, username: p.username }))
+        }));
+      }
+      
+      if (msg.type === 'leave_room') {
+        if (currentRoom && gameRooms[currentRoom]) {
+          delete gameRooms[currentRoom].players[playerId];
+          broadcastMulti(currentRoom, {
+            type: 'room_update',
+            players: Object.values(gameRooms[currentRoom].players).map(p => ({ id: p.id, username: p.username }))
+          });
+        }
+      }
+    });
+    
+    ws.on('close', () => {
+      if (currentRoom && gameRooms[currentRoom]) {
+        delete gameRooms[currentRoom].players[playerId];
+      }
+    });
+  });
+  
+  return wss;
+}
+
+function broadcastMulti(roomId, message) {
+  const room = gameRooms[roomId];
+  if (!room) return;
+  for (let pid in room.players) {
+    const p = room.players[pid];
+    if (p.ws && p.ws.readyState === 1) {
+      p.ws.send(JSON.stringify(message));
+    }
+  }
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (let roomId in gameRooms) {
+    if (now - gameRooms[roomId].createdAt > 3600000) {
+      delete gameRooms[roomId];
+    }
+  }
+}, 3600000);
 
 wsServer.on('connection', (ws) => {
   let playerId = null;
@@ -340,8 +424,11 @@ const server = http.createServer((req, res) => {
   res.writeHead(404); res.end('Not found');
 });
 
+// Подключаем WebSocket к серверу
+const wss = setupWebSocket(server);
+
 server.listen(PORT, () => {
-  console.log(`🟢 Сервер на порту ${PORT}`);
+  console.log(`🟢 Сервер на порту ${PORT} (HTTP + WebSocket)`);
   https.get(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook?url=https://blackjack-server-x391.onrender.com/webhook`, (res) => {
     let d = ''; res.on('data', c => d += c); res.on('end', () => console.log('📡 Webhook:', d));
   });
