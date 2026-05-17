@@ -169,6 +169,104 @@ async function handleDaily(chatId, userId) {
     await sendMessage(chatId, `⏰ Бонус будет доступен через <b>${result.hoursLeft} ч.</b>\nПриходите позже!`, getMainKeyboard());
   }
 }
+// ═══════════════════ WEBSOCKET ДЛЯ МУЛЬТИПЛЕЕРА ═══════════════════
+const WebSocket = require('ws');
+const wss = new WebSocket.Server({ server: http.createServer() });
+
+let gameRooms = {};
+
+// Перенесём WebSocket на основной сервер позже
+// Сейчас используем отдельный порт
+const wsServer = new WebSocket.Server({ port: 8080 });
+
+wsServer.on('connection', (ws) => {
+  let playerId = null;
+  let currentRoom = null;
+  
+  ws.on('message', (raw) => {
+    let msg;
+    try { msg = JSON.parse(raw); } catch(e) { return; }
+    
+    switch(msg.type) {
+      case 'join_multi':
+        playerId = msg.userId;
+        currentRoom = msg.roomId;
+        
+        if (!gameRooms[currentRoom]) {
+          gameRooms[currentRoom] = {
+            id: currentRoom,
+            players: {},
+            host: playerId,
+            createdAt: Date.now()
+          };
+        }
+        
+        if (Object.keys(gameRooms[currentRoom].players).length >= 4) {
+          ws.send(JSON.stringify({ type: 'error', message: 'Комната заполнена' }));
+          return;
+        }
+        
+        gameRooms[currentRoom].players[playerId] = {
+          id: playerId,
+          username: msg.username,
+          ws: ws
+        };
+        
+        broadcastMulti(currentRoom, {
+          type: 'room_update',
+          players: Object.values(gameRooms[currentRoom].players).map(p => ({ id: p.id, username: p.username }))
+        });
+        
+        ws.send(JSON.stringify({
+          type: 'joined_room',
+          roomId: currentRoom,
+          players: Object.values(gameRooms[currentRoom].players).map(p => ({ id: p.id, username: p.username }))
+        }));
+        break;
+        
+      case 'leave_room':
+        if (currentRoom && gameRooms[currentRoom]) {
+          delete gameRooms[currentRoom].players[playerId];
+          broadcastMulti(currentRoom, {
+            type: 'room_update',
+            players: Object.values(gameRooms[currentRoom].players).map(p => ({ id: p.id, username: p.username }))
+          });
+          if (Object.keys(gameRooms[currentRoom].players).length === 0) {
+            delete gameRooms[currentRoom];
+          }
+        }
+        break;
+    }
+  });
+  
+  ws.on('close', () => {
+    if (currentRoom && gameRooms[currentRoom]) {
+      delete gameRooms[currentRoom].players[playerId];
+    }
+  });
+});
+
+function broadcastMulti(roomId, message) {
+  const room = gameRooms[roomId];
+  if (!room) return;
+  for (let pid in room.players) {
+    const p = room.players[pid];
+    if (p.ws && p.ws.readyState === 1) {
+      p.ws.send(JSON.stringify(message));
+    }
+  }
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (let roomId in gameRooms) {
+    if (now - gameRooms[roomId].createdAt > 3600000) {
+      delete gameRooms[roomId];
+    }
+  }
+}, 3600000);
+
+console.log('🎮 WebSocket для мультиплеера запущен на порту 8080');
 
 // ═══════════════════ HTTP + WEBHOOK ═══════════════════
 const server = http.createServer((req, res) => {
