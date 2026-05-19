@@ -8,12 +8,10 @@ const BOT_TOKEN = '8190709618:AAECqs5XMc5RtfctgbPUdrGSZJj2pV6ZeoU';
 const GAME_URL = 'https://sergeistjopkin-dotcom.github.io/blackjack-telegram-game/';
 const DB_FILE = './blackjack_db.json';
 
-// База данных
 let DB = { players: {}, leaderboard: [] };
 try { if (fs.existsSync(DB_FILE)) DB = JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); } catch(e) {}
 function saveDB() { fs.writeFileSync(DB_FILE, JSON.stringify(DB, null, 2)); }
 
-// Комнаты для мультиплеера
 let gameRooms = {};
 
 const ACHIEVEMENTS = {
@@ -106,17 +104,15 @@ async function handleDaily(chatId, userId) {
   else await sendMessage(chatId, `⏰ Бонус через ${r.hoursLeft} ч.`);
 }
 
-// HTTP сервер
 const server = http.createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  
   if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
   
   if (req.url === '/health') {
     res.writeHead(200, {'Content-Type':'application/json'});
-    res.end(JSON.stringify({status:'online',players:Object.keys(DB.players).length,rooms:Object.keys(gameRooms).length}));
+    res.end(JSON.stringify({status:'online',rooms:Object.keys(gameRooms).length}));
     return;
   }
   
@@ -155,7 +151,6 @@ const server = http.createServer((req, res) => {
         if (update.message?.text) {
           const m = update.message, chatId = m.chat.id, uid = m.from.id.toString();
           if (m.text === '/start') await handleStart(chatId, m.from);
-          else if (m.text === '/leaderboard') await handleLeaderboard(chatId);
         }
         if (update.callback_query) {
           const cb = update.callback_query, chatId = cb.message.chat.id, uid = cb.from.id.toString();
@@ -176,113 +171,63 @@ const server = http.createServer((req, res) => {
   res.writeHead(404); res.end('Not found');
 });
 
-// WebSocket сервер НА ТОМ ЖЕ ПОРТУ
+// WebSocket
 const wss = new WebSocket.Server({ server });
-
 wss.on('connection', (ws) => {
-  let playerId = null;
-  let currentRoom = null;
-  
-  console.log('🔗 Новое WebSocket подключение');
+  let playerId = null, currentRoom = null;
+  console.log('🔗 WebSocket подключение');
   
   ws.on('message', (raw) => {
     let msg;
     try { msg = JSON.parse(raw); } catch(e) { return; }
-    console.log('📨 WebSocket сообщение:', msg.type);
+    console.log('📨', msg.type);
     
     if (msg.type === 'join_multi') {
-      playerId = msg.userId;
-      currentRoom = msg.roomId;
-      
+      playerId = msg.userId; currentRoom = msg.roomId;
       if (!gameRooms[currentRoom]) {
-        gameRooms[currentRoom] = {
-          id: currentRoom,
-          players: {},
-          host: playerId,
-          createdAt: Date.now()
-        };
-        console.log('🏠 Создана комната:', currentRoom);
+        gameRooms[currentRoom] = { id: currentRoom, players: {}, host: playerId, createdAt: Date.now() };
+        console.log('🏠 Комната создана:', currentRoom);
       }
-      
       if (Object.keys(gameRooms[currentRoom].players).length >= 4) {
-        ws.send(JSON.stringify({ type: 'error', message: 'Комната заполнена (макс. 4)' }));
-        return;
+        ws.send(JSON.stringify({ type: 'error', message: 'Комната заполнена' })); return;
       }
-      
-      gameRooms[currentRoom].players[playerId] = {
-        id: playerId,
-        username: msg.username,
-        ws: ws
-      };
-      
+      gameRooms[currentRoom].players[playerId] = { id: playerId, username: msg.username, ws };
       const players = Object.values(gameRooms[currentRoom].players).map(p => ({ id: p.id, username: p.username }));
-      
-      // Отправляем подтверждение
-      ws.send(JSON.stringify({
-        type: 'joined_room',
-        roomId: currentRoom,
-        players: players
-      }));
-      
-      // Оповещаем всех в комнате
-      broadcastRoom(currentRoom, {
-        type: 'room_update',
-        players: players
-      });
-      
-      console.log(`👤 ${msg.username} в комнате ${currentRoom} (${players.length}/4)`);
+      ws.send(JSON.stringify({ type: 'joined_room', roomId: currentRoom, players }));
+      broadcastRoom(currentRoom, { type: 'room_update', players });
     }
     
     if (msg.type === 'leave_room') {
       if (currentRoom && gameRooms[currentRoom]) {
         delete gameRooms[currentRoom].players[playerId];
         const players = Object.values(gameRooms[currentRoom].players).map(p => ({ id: p.id, username: p.username }));
-        broadcastRoom(currentRoom, { type: 'room_update', players: players });
-        if (Object.keys(gameRooms[currentRoom].players).length === 0) {
-          delete gameRooms[currentRoom];
-          console.log('🗑️ Комната удалена:', currentRoom);
-        }
+        broadcastRoom(currentRoom, { type: 'room_update', players });
+        if (Object.keys(gameRooms[currentRoom].players).length === 0) delete gameRooms[currentRoom];
       }
     }
   });
   
   ws.on('close', () => {
-    console.log('🔌 WebSocket отключён');
     if (currentRoom && gameRooms[currentRoom]) {
       delete gameRooms[currentRoom].players[playerId];
-      const players = Object.values(gameRooms[currentRoom].players).map(p => ({ id: p.id, username: p.username }));
-      broadcastRoom(currentRoom, { type: 'room_update', players: players });
+      broadcastRoom(currentRoom, { type: 'room_update', players: Object.values(gameRooms[currentRoom].players).map(p => ({ id: p.id, username: p.username })) });
     }
-  });
-  
-  ws.on('error', (err) => {
-    console.error('❌ WebSocket ошибка:', err.message);
   });
 });
 
-function broadcastRoom(roomId, message) {
+function broadcastRoom(roomId, msg) {
   const room = gameRooms[roomId];
   if (!room) return;
-  const data = JSON.stringify(message);
+  const data = JSON.stringify(msg);
   for (let pid in room.players) {
-    const p = room.players[pid];
-    if (p.ws && p.ws.readyState === 1) {
-      p.ws.send(data);
-    }
+    if (room.players[pid].ws?.readyState === 1) room.players[pid].ws.send(data);
   }
 }
 
-// Очистка комнат каждый час
-setInterval(() => {
-  const now = Date.now();
-  for (let id in gameRooms) {
-    if (now - gameRooms[id].createdAt > 3600000) delete gameRooms[id];
-  }
-}, 3600000);
+setInterval(() => { const now = Date.now(); for (let id in gameRooms) { if (now - gameRooms[id].createdAt > 3600000) delete gameRooms[id]; } }, 3600000);
 
-// Запуск
 server.listen(PORT, () => {
-  console.log(`🟢 Сервер на порту ${PORT} (HTTP + WebSocket)`);
+  console.log(`🟢 Сервер на порту ${PORT}`);
   https.get(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook?url=https://blackjack-server-x391.onrender.com/webhook`, res => {
     let d = ''; res.on('data', c => d += c); res.on('end', () => console.log('📡 Webhook:', d));
   });
